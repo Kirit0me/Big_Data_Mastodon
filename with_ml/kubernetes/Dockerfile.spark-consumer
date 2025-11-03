@@ -1,0 +1,39 @@
+FROM python:3.10
+
+# Install Java (use default-jdk which works on all Debian versions)
+RUN apt-get update && \
+    apt-get install -y \
+    default-jdk \
+    wget \
+    procps \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Java home
+ENV JAVA_HOME=/usr/lib/jvm/default-java
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+
+WORKDIR /app
+
+# Install Python dependencies
+RUN pip install --no-cache-dir \
+    pyspark==3.5.0 \
+    psycopg2-binary \
+    textblob \
+    spacy
+
+# Download NLP models (combine to reduce layers)
+RUN python -m spacy download en_core_web_sm && \
+    python -m textblob.download_corpora
+
+# Copy application files
+COPY consumer_ml_enhanced.py .
+COPY aspect_sentiment.py .
+
+# Run spark-submit
+CMD ["spark-submit", \
+     "--master", "local[*]", \
+     "--packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0", \
+     "--driver-memory", "2g", \
+     "consumer_ml_enhanced.py"]

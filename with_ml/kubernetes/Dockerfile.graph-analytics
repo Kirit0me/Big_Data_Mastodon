@@ -1,0 +1,12 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    networkx \
+    kafka-python \
+    psycopg2-binary
+
+COPY graph_analytics.py .
+
+CMD ["python", "graph_analytics.py"]

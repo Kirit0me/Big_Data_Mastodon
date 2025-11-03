@@ -1,0 +1,12 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    Mastodon.py \
+    kafka-python \
+    psycopg2-binary
+
+COPY producer_updated.py .
+
+CMD ["python", "producer_updated.py"]

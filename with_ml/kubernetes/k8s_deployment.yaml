@@ -1,0 +1,445 @@
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mastodon-analytics
+
+---
+# ConfigMap for shared configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mastodon-config
+  namespace: mastodon-analytics
+data:
+  KAFKA_BOOTSTRAP_SERVERS: "kafka-service:9092"
+  POSTGRES_HOST: "postgres-service"
+  POSTGRES_DB: "mastodon_analytics"
+  POSTGRES_USER: "mastodon"
+  MASTODON_API_URL: "https://mastodon.social"
+  TOPIC_RAW: "mastodon-raw"
+  TOPIC_PROCESSED: "mastodon-processed"
+
+---
+# Secret for sensitive credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mastodon-secrets
+  namespace: mastodon-analytics
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: "your_password"
+  MASTODON_CLIENT_ID: "qpHVy7dW7A_2lkNsseHiUFetEqHIfEuKIc8e6zirvNM"
+  MASTODON_CLIENT_SECRET: "Yupj-XTy-Dy99c7RFn8DCPHS_vgHYysRKVUjM1M0Frk"
+  MASTODON_ACCESS_TOKEN: "i2rC1YQsJbOpnAL-o-Tzr_k6Bfgj8J3SGlgKudX2iQY"
+
+---
+# PostgreSQL StatefulSet
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: mastodon-analytics
+spec:
+  ports:
+  - port: 5432
+  selector:
+    app: postgres
+  clusterIP: None
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: mastodon-analytics
+spec:
+  serviceName: postgres-service
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: mastodon-config
+              key: POSTGRES_DB
+        - name: POSTGRES_USER
+          valueFrom:
+            configMapKeyRef:
+              name: mastodon-config
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mastodon-secrets
+              key: POSTGRES_PASSWORD
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        - name: init-script
+          mountPath: /docker-entrypoint-initdb.d
+      volumes:
+      - name: init-script
+        configMap:
+          name: postgres-init-sql
+  volumeClaimTemplates:
+  - metadata:
+      name: postgres-storage
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 20Gi
+
+---
+# Zookeeper Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: zookeeper-service
+  namespace: mastodon-analytics
+spec:
+  ports:
+  - port: 2181
+  selector:
+    app: zookeeper
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zookeeper
+  namespace: mastodon-analytics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zookeeper
+  template:
+    metadata:
+      labels:
+        app: zookeeper
+    spec:
+      containers:
+      - name: zookeeper
+        image: confluentinc/cp-zookeeper:7.5.0
+        ports:
+        - containerPort: 2181
+        env:
+        - name: ZOOKEEPER_CLIENT_PORT
+          value: "2181"
+        - name: ZOOKEEPER_TICK_TIME
+          value: "2000"
+        volumeMounts:
+        - name: zk-data
+          mountPath: /var/lib/zookeeper
+      volumes:
+      - name: zk-data
+        emptyDir: {}
+
+---
+# Kafka Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-service
+  namespace: mastodon-analytics
+spec:
+  ports:
+  - port: 9092
+  selector:
+    app: kafka
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka
+  namespace: mastodon-analytics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      containers:
+      - name: kafka
+        image: confluentinc/cp-kafka:7.5.0
+        ports:
+        - containerPort: 9092
+        env:
+        - name: KAFKA_BROKER_ID
+          value: "1"
+        - name: KAFKA_ZOOKEEPER_CONNECT
+          value: "zookeeper-service:2181"
+        - name: KAFKA_ADVERTISED_LISTENERS
+          value: "PLAINTEXT://kafka-service:9092"
+        - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+          value: "1"
+        - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+          value: "true"
+        volumeMounts:
+        - name: kafka-data
+          mountPath: /var/lib/kafka/data
+      volumes:
+      - name: kafka-data
+        emptyDir: {}
+
+---
+# Mastodon Producer Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mastodon-producer
+  namespace: mastodon-analytics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mastodon-producer
+  template:
+    metadata:
+      labels:
+        app: mastodon-producer
+    spec:
+      containers:
+      - name: producer
+        image: mastodon-producer:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          valueFrom:
+            configMapKeyRef:
+              name: mastodon-config
+              key: KAFKA_BOOTSTRAP_SERVERS
+        - name: MASTODON_API_URL
+          valueFrom:
+            configMapKeyRef:
+              name: mastodon-config
+              key: MASTODON_API_URL
+        - name: TOPIC_RAW
+          valueFrom:
+            configMapKeyRef:
+              name: mastodon-config
+              key: TOPIC_RAW
+        - name: MASTODON_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: mastodon-secrets
+              key: MASTODON_CLIENT_ID
+        - name: MASTODON_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: mastodon-secrets
+              key: MASTODON_CLIENT_SECRET
+        - name: MASTODON_ACCESS_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: mastodon-secrets
+              key: MASTODON_ACCESS_TOKEN
+
+---
+# Spark Consumer Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-consumer
+  namespace: mastodon-analytics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark-consumer
+  template:
+    metadata:
+      labels:
+        app: spark-consumer
+    spec:
+      containers:
+      - name: spark-consumer
+        image: spark-consumer:latest
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+        env:
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          valueFrom:
+            configMapKeyRef:
+              name: mastodon-config
+              key: KAFKA_BOOTSTRAP_SERVERS
+        - name: POSTGRES_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: mastodon-config
+              key: POSTGRES_HOST
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: mastodon-config
+              key: POSTGRES_DB
+        - name: POSTGRES_USER
+          valueFrom:
+            configMapKeyRef:
+              name: mastodon-config
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mastodon-secrets
+              key: POSTGRES_PASSWORD
+
+---
+# ML Training Service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-training
+  namespace: mastodon-analytics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ml-training
+  template:
+    metadata:
+      labels:
+        app: ml-training
+    spec:
+      containers:
+      - name: ml-training
+        image: ml-training:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: POSTGRES_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: mastodon-config
+              key: POSTGRES_HOST
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: mastodon-config
+              key: POSTGRES_DB
+        - name: POSTGRES_USER
+          valueFrom:
+            configMapKeyRef:
+              name: mastodon-config
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mastodon-secrets
+              key: POSTGRES_PASSWORD
+
+---
+# Graph Analytics Service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: graph-analytics
+  namespace: mastodon-analytics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: graph-analytics
+  template:
+    metadata:
+      labels:
+        app: graph-analytics
+    spec:
+      containers:
+      - name: graph-analytics
+        image: graph-analytics:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: POSTGRES_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: mastodon-config
+              key: POSTGRES_HOST
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: mastodon-config
+              key: POSTGRES_DB
+        - name: POSTGRES_USER
+          valueFrom:
+            configMapKeyRef:
+              name: mastodon-config
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mastodon-secrets
+              key: POSTGRES_PASSWORD
+
+---
+# Grafana Service (for visualization)
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana-service
+  namespace: mastodon-analytics
+spec:
+  type: NodePort
+  ports:
+  - port: 3000
+    targetPort: 3000
+    nodePort: 30300
+  selector:
+    app: grafana
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: mastodon-analytics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+      - name: grafana
+        image: grafana/grafana:latest
+        ports:
+        - containerPort: 3000
+        env:
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          value: "admin"
+        volumeMounts:
+        - name: grafana-storage
+          mountPath: /var/lib/grafana
+      volumes:
+      - name: grafana-storage
+        emptyDir: {}
